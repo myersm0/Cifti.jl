@@ -1,84 +1,71 @@
 
-function read_cifti(ciftifile::String; dtype = Float32)::Matrix{Float32}
-	@assert isfile(ciftifile)
-	fid = open(ciftifile, "r")
-	temp = zeros(UInt8, nifti_hdr_size)
-	readbytes!(fid, temp, nifti_hdr_size)
-	hdr = reinterpret(Int32, temp)
-	@assert(hdr[1] == nifti_hdr_size, "Input file doesn't follow cifti2 specs")
-	nrows = Int64(hdr[15])
-	ncols = Int64(hdr[17])
-	vox_offset = hdr[43] # where does the data begin
+struct CiftiObj
+	data::Matrix
+	brainstructure::Dict{CiftiStructure, UnitRange}
+end
 
-	seek(fid, vox_offset)
-	bytes_to_read = nrows * ncols * sizeof(dtype)
+function Base.getindex(cifti::CiftiObj, s::CiftiStructure)
+	inds = cifti.brainstructure[s]
+	cifti.data[:, inds]
+end
+
+function Base.getindex(cifti::CiftiObj, s::Vector{CiftiStructure})
+	inds = union([cifti.brainstructure[x] for x in s]...)
+	cifti.data[:, inds]
+end
+
+# specifically the below assumes we'll deal with headers of the NIfTI-2 spec;
+# there are many more fields available, but this is sufficient for basic use
+struct NiftiHeader
+	dtype::DataType
+	nrows::Int64
+	ncols::Int64
+	vox_offset::Int64
+end
+
+function get_nifti2_hdr(fid::IOStream)::NiftiHeader
+	seek(fid, 0)
+	bytes = zeros(UInt8, nifti_hdr_size)
+	readbytes!(fid, bytes, nifti_hdr_size)
+	dtype = dtypes[reinterpret(Int16, bytes[13:14])[1]]
+	dims = reinterpret(Int64, bytes[17:80])
+	nrows = dims[6]
+	ncols = dims[7]
+	vox_offset = reinterpret(Int64, bytes[169:176])[1]
+	NiftiHeader(dtype, nrows, ncols, vox_offset)
+end
+
+function get_cifti_data(fid::IOStream, hdr::NiftiHeader)
+	seek(fid, hdr.vox_offset)
+	bytes_to_read = hdr.nrows * hdr.ncols * sizeof(hdr.dtype)
 	data = zeros(UInt8, bytes_to_read)
 	readbytes!(fid, data, bytes_to_read)
-	close(fid)
-
-	@chain data begin
-		reinterpret(dtype, _)
-		reshape(_, (nrows, ncols))
-	end
-end
-export read_cifti
-
-# helper for get_brainstructure()
-function parse_verts_from_node(node::EzXML.Node)
-	@chain node begin
-		nodecontent
-		strip 
-		split 
-		parse.(Int, _)
-	end
+	@chain data reinterpret(hdr.dtype, _) reshape(_, (hdr.nrows, hdr.ncols))
 end
 
-function get_brainstructure(filename::String)::Vector{CiftiStruct}
-	fid = open(filename, "r")
-	hdr = zeros(UInt8, nifti_hdr_size)
-	readbytes!(fid, hdr, nifti_hdr_size)
-
-	# most of the below vars will not be needed; this is just to demo
-	# how they may be extracted from the hdr, if we ever want to do so
-	sizeof_hdr = reinterpret(Int32, hdr[1:4])[1]
-	data_type = reinterpret(Int16, hdr[13:14])[1]
-	bitpix = reinterpret(Int16, hdr[15:16])[1]
-	dim = reinterpret(Int64, hdr[17:80])
-	vox_offset = reinterpret(Int64, hdr[169:176])[1]
-	intent_code = reinterpret(Int32, hdr[505:508])[1]
-	intent_name = 
-		@chain begin
-			hdr[509:(509 + 15)]
-			Char.(_)
-			filter(x -> x != '\0', _)
-			join
-		end
-	dim_info = Char(hdr[525])
-	nrows = dim[7]
-	ncols = dim[6]
-
+function extract_xml(fid::IOStream, hdr::NiftiHeader)::EzXML.Node
 	# parse xml from raw bytes that follow the hdr
 	seek(fid, nifti_hdr_size)
-	temp = zeros(UInt8, vox_offset - nifti_hdr_size)
-	readbytes!(fid, temp, vox_offset - nifti_hdr_size)
-	filter!(x -> x != 0, temp)
-	start_at = 1 + findfirst(temp .== 0x0a) # xml begins after 1st newline
-	docroot = 
-		@chain begin
-			temp[start_at:end]
-			Char.(_)
-			join
-			parsexml
-			root
-		end
+	bytes = zeros(UInt8, hdr.vox_offset - nifti_hdr_size)
+	readbytes!(fid, bytes, hdr.vox_offset - nifti_hdr_size)
+	filter!(.!iszero, bytes) # the below will error if we don't remove null bytes
+	start_at = 1 + findfirst(bytes .== UInt8('\n')) # xml begins after 1st newline
+	@chain begin
+		bytes[start_at:end] 
+		Char.(_) 
+		join 
+		parsexml 
+		root
+	end
+end
 
+function parse_brainmodel(docroot::EzXML.Node)::Dict{CiftiStructure, UnitRange}
 	brainmodel_nodes = findall("//BrainModel", docroot)
-	brainstructure = Vector{CiftiStruct}()
+	brainstructure = Dict{CiftiStructure, UnitRange}()
 	for node in brainmodel_nodes
-		verts = parse_verts_from_node(node)
+#		verts = @chain node nodecontent strip split parse.(Int, _)
 		index_offset = parse(Int, node["IndexOffset"])
 		index_count = parse(Int, node["IndexCount"])
-		@assert index_offset == length(brainstructure)
 		struct_name = 
 			@chain begin
 				node["BrainStructure"]
@@ -86,11 +73,24 @@ function get_brainstructure(filename::String)::Vector{CiftiStruct}
 				Meta.parse
 				eval
 			end
-		append!(brainstructure, fill(struct_name, index_count))
+		start = index_offset + 1
+		stop = start + index_count - 1
+		brainstructure[struct_name] = start:stop
 	end
-	close(fid)
 	brainstructure
 end
-export get_brainstructure
+
+function read_cifti(filename::String)::CiftiObj
+	@assert(isfile(filename), "$filename doesn't exist")
+	open(filename, "r") do fid
+		hdr = get_nifti2_hdr(fid)
+		data = get_cifti_data(fid, hdr)
+		brainstructure = extract_xml(fid, hdr) |> parse_brainmodel
+		return CiftiObj(data, brainstructure)
+	end
+end
+export read_cifti
+
+
 
 

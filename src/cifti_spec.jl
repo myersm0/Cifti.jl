@@ -9,7 +9,7 @@ macro exported_enum(name, args...)
 	end
 export exported_enum
 
-@exported_enum(CiftiStruct,
+@exported_enum(CiftiStructure,
 	CORTEX_LEFT, CORTEX_RIGHT,
 	ACCUMBENS_LEFT, ACCUMBENS_RIGHT,
 	AMYGDALA_LEFT, AMYGDALA_RIGHT,
@@ -21,8 +21,7 @@ export exported_enum
 	PUTAMEN_LEFT, PUTAMEN_RIGHT,
 	THALAMUS_LEFT, THALAMUS_RIGHT,
 	# in my experience, structures in cifti files are limited to the above;
-	# but the specification lists the following additional possible values,
-	# so listing these for completeness:
+	# but the specification lists the following additional possible values:
 	CORTEX,
 	CEREBELLUM,
 	CEREBELLAR_WHITE_MATTER_LEFT, CEREBELLAR_WHITE_MATTER_RIGHT,
@@ -30,7 +29,28 @@ export exported_enum
 	ALL_WHITE_MATTER, ALL_GREY_MATTER,
 	OTHER
 )
-export CiftiStruct
+export CiftiStructure
 
 const nifti_hdr_size = 540
+
+# we refer to left and right cortex so often that it's worth having a shorthand
+const L = CORTEX_LEFT
+const R = CORTEX_RIGHT
+export L, R
+
+# dict to map integer codes representing data type found in the nifti2 header
+# (note: not listing certain of those codes that aren't primitive Julia types)
+const dtypes = Dict{Int16, DataType}(
+	1 => Bool,
+	2 => UInt8,
+	4 => Int16,
+	8 => Int32,
+	16 => Float32,
+	64 => Float64,
+	256 => Int8,
+	512 => UInt16,
+	768 => UInt32,
+	1024 => Int64,
+	1280 => UInt64
+)
 
