@@ -1,15 +1,12 @@
 
-
-
 module Cifti
 
-using EzXML
-using Chain
+import EzXML
+import Chain
+import OrderedCollections
 
 include("cifti_spec.jl")
 include("io.jl")
-include("parcel-handling.jl")
 
 end
-
 
